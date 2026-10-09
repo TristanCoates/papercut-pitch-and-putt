@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PaperCut Pitch &amp; Putt</title>
+<meta name="description" content="A six-hole office mini golf game with real 2D physics. Sink the paper ball in as few strokes as you can.">
+<style>
+  :root {
+    --bg: #10161a;
+    --panel: #1a2329;
+    --text: #e8f0ec;
+    --muted: #93a39b;
+    --accent: #6cc04a;
+    --accent-dark: #3f8a26;
+    --line: #2b3840;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 16px;
+  }
+  header { width: 100%; max-width: 960px; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: .2px; }
+  h1 span { color: var(--accent); }
+  .tag { color: var(--muted); font-size: 13px; }
+  .hud { width: 100%; max-width: 960px; display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px 10px 0 0; font-variant-numeric: tabular-nums; }
+  .hud b { color: var(--accent); font-weight: 600; }
+  .stage { position: relative; width: 100%; max-width: 960px; aspect-ratio: 8 / 5; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 10px 10px; overflow: hidden; touch-action: none; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  .overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(8, 12, 14, .72); }
+  .overlay.show { display: flex; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; max-width: 92%; text-align: center; }
+  .card h2 { margin: 0 0 6px; font-size: 22px; }
+  .card p { margin: 6px 0 14px; color: var(--muted); }
+  button { font: inherit; font-weight: 600; background: var(--accent); color: #0b1a06; border: 0; border-radius: 8px; padding: 9px 18px; cursor: pointer; }
+  button:hover { background: #7fd25c; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  table { border-collapse: collapse; margin: 6px auto 14px; font-variant-numeric: tabular-nums; }
+  td, th { padding: 4px 10px; border-bottom: 1px solid var(--line); text-align: center; }
+  th:first-child, td:first-child { text-align: left; }
+  .controls { width: 100%; max-width: 960px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+  .msg { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); background: rgba(16, 22, 26, .85); color: var(--text); padding: 6px 14px; border-radius: 20px; font-weight: 600; pointer-events: none; opacity: 0; transition: opacity .25s; white-space: nowrap; }
+  .msg.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PaperCut <span>Pitch &amp; Putt</span></h1>
+  <div class="tag">Six holes of office mini golf. Sink the paper ball in as few strokes as you can.</div>
+</header>
+
+<div class="hud" id="hud"></div>
+<div class="stage" id="stage">
+  <canvas id="c"></canvas>
+  <div class="msg" id="msg"></div>
+  <div class="overlay" id="overlay"><div class="card" id="card"></div></div>
+</div>
+<div class="controls">
+  <div>Drag back from anywhere and let go to putt. The further you pull, the harder the shot.</div>
+  <div><button class="ghost" id="restart">Restart hole</button></div>
+</div>
+
+<script src="matter.min.js"></script>
+<script>
+(() => {
+  const { Engine, Bodies, Body, Composite, Events } = Matter;
+  const W = 800, H = 500;
+  const BALL_R = 9, CUP_R = 14, MAX_SPEED = 19, MAX_PULL = 160;
+  const FRICTION_GRASS = 0.017, FRICTION_TONER = 0.085;
+
+  // Shapes: walls [x, y, w, h, angleDeg] centred; zones [x, y, w, h] centred;
+  // bumpers [x, y, r]; spinners [x, y, length, speed]; movers [x, y, w, h, axis, amp, speed].
+  const HOLES = [
+    { name: 'The Print Queue', par: 2, tee: [110, 250], cup: [690, 250],
+      walls: [[400, 250, 34, 190, 0]] },
+    { name: 'Follow-Me Release', par: 3, tee: [100, 430], cup: [700, 80],
+      walls: [[290, 335, 34, 330, 0], [530, 165, 34, 330, 0]] },
+    { name: 'Toner Spill', par: 3, tee: [90, 90], cup: [710, 410],
+      toner: [[410, 265, 270, 210]],
+      walls: [[640, 230, 170, 24, 40], [250, 400, 160, 24, -25]],
+      bumpers: [[410, 90, 22]] },
+    { name: 'Paper Jam', par: 3, tee: [100, 250], cup: [700, 250],
+      walls: [[400, 55, 34, 110, 0], [400, 445, 34, 110, 0]],
+      spinners: [[400, 250, 250, 0.022]] },
+    { name: 'Coffee Break', par: 3, tee: [100, 90], cup: [700, 90],
+      coffee: [[400, 150, 210, 300]],
+      movers: [[400, 400, 70, 56, 'y', 62, 0.025]] },
+    { name: 'The Last Page', par: 4, tee: [80, 440], cup: [720, 70],
+      walls: [[230, 330, 210, 24, -30], [450, 210, 26, 280, 0], [620, 330, 200, 24, 30], [610, 150, 150, 24, -15]],
+      bumpers: [[300, 150, 24], [700, 230, 20]],
+      toner: [[330, 455, 150, 70]] },
+  ];
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const hudEl = document.getElementById('hud');
+  const msgEl = document.getElementById('msg');
+  const overlay = document.getElementById('overlay');
+  const card = document.getElementById('card');
+
+  let engine, ball, hole, holeIndex = 0, strokes = 0, scores = [];
+  let state = 'aim'; // aim | rolling | sunk | done
+  let lastRest = { x: 0, y: 0 };
+  let aimStart = null, aimNow = null;
+  let dynamic = []; // { body, kind, ...params }
+  let tick = 0, sinkT = 0, msgTimer = 0;
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const r = canvas.getBoundingClientRect();
+    canvas.width = Math.round(r.width * dpr);
+    canvas.height = Math.round(r.height * dpr);
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  }
+
+  function wall(x, y, w, h, deg = 0, extra = {}) {
+    return Bodies.rectangle(x, y, w, h, Object.assign({ isStatic: true, angle: deg * Math.PI / 180, restitution: 0.75, friction: 0, label: 'wall' }, extra));
+  }
+
+  function loadHole(i) {
+    holeIndex = i;
+    hole = HOLES[i];
+    strokes = 0;
+    state = 'aim';
+    tick = 0;
+    dynamic = [];
+    engine = Engine.create({ gravity: { x: 0, y: 0 }, positionIterations: 10, velocityIterations: 8 });
+    const t = 60;
+    const bodies = [
+      wall(W / 2, -t / 2, W + 2 * t, t), wall(W / 2, H + t / 2, W + 2 * t, t),
+      wall(-t / 2, H / 2, t, H + 2 * t), wall(W + t / 2, H / 2, t, H + 2 * t),
+    ];
+    (hole.walls || []).forEach(w => bodies.push(wall(...w)));
+    (hole.bumpers || []).forEach(([x, y, r]) => bodies.push(Bodies.circle(x, y, r, { isStatic: true, restitution: 1.15, label: 'bumper' })));
+    (hole.spinners || []).forEach(([x, y, len, speed]) => {
+      const b = wall(x, y, len, 22, 0, { label: 'spinner', restitution: 0.6 });
+      bodies.push(b); dynamic.push({ body: b, kind: 'spin', speed });
+    });
+    (hole.movers || []).forEach(([x, y, w, h, axis, amp, speed]) => {
+      const b = wall(x, y, w, h, 0, { label: 'mover', restitution: 0.6 });
+      bodies.push(b); dynamic.push({ body: b, kind: 'move', x, y, axis, amp, speed });
+    });
+    ball = Bodies.circle(hole.tee[0], hole.tee[1], BALL_R, {
+      restitution: 0.55, friction: 0.01, frictionStatic: 0, frictionAir: FRICTION_GRASS, density: 0.004, label: 'ball',
+    });
+    bodies.push(ball);
+    Composite.add(engine.world, bodies);
+    lastRest = { x: hole.tee[0], y: hole.tee[1] };
+    overlay.classList.remove('show');
+    updateHud();
+  }
+
+  const inRect = (p, [x, y, w, h], pad = 0) => Math.abs(p.x - x) <= w / 2 - pad && Math.abs(p.y - y) <= h / 2 - pad;
+
+  function stepWorld() {
+    tick++;
+    for (const d of dynamic) {
+      const b = d.body;
+      if (d.kind === 'spin') {
+        Body.setAngle(b, b.angle + d.speed, true);
+      } else {
+        const off = Math.sin(tick * d.speed) * d.amp;
+        Body.setPosition(b, d.axis === 'y' ? { x: d.x, y: d.y + off } : { x: d.x + off, y: d.y }, true);
+      }
+    }
+
+    if (state === 'rolling' || state === 'aim') {
+      ball.frictionAir = (hole.toner || []).some(z => inRect(ball.position, z)) ? FRICTION_TONER : FRICTION_GRASS;
+    }
+
+    Engine.update(engine, 1000 / 60);
+
+    if (state !== 'rolling') { if (state === 'aim') Body.setVelocity(ball, { x: 0, y: 0 }); return; }
+
+    const p = ball.position, v = ball.velocity, speed = Math.hypot(v.x, v.y);
+    const dx = hole.cup[0] - p.x, dy = hole.cup[1] - p.y, dist = Math.hypot(dx, dy);
+
+    // Cup: slow enough over the hole drops in; nearby it gets pulled toward the centre (the lip).
+    if (dist < CUP_R - 2 && speed < 6.5) { sink(); return; }
+    if (dist < CUP_R + 6) {
+      const pull = 0.00012 * (1 - dist / (CUP_R + 6));
+      Body.applyForce(ball, p, { x: dx * pull, y: dy * pull });
+    }
+
+    if ((hole.coffee || []).some(z => inRect(p, z, BALL_R * 0.4))) {
+      strokes++;
+      flash('Coffee spill! +1 stroke');
+      Body.setPosition(ball, lastRest); Body.setVelocity(ball, { x: 0, y: 0 });
+      state = 'aim'; updateHud(); return;
+    }
+
+    if (p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20) {
+      Body.setPosition(ball, lastRest); Body.setVelocity(ball, { x: 0, y: 0 });
+      state = 'aim'; return;
+    }
+
+    // Grass grabs a slow ball so it doesn't creep forever.
+    if (speed < 0.45) Body.setVelocity(ball, { x: v.x * 0.92, y: v.y * 0.92 });
+    if (speed < 0.06) {
+      Body.setVelocity(ball, { x: 0, y: 0 });
+      Body.setAngularVelocity(ball, 0);
+      lastRest = { x: p.x, y: p.y };
+      state = 'aim';
+    }
+  }
+
+  function sink() {
+    state = 'sunk';
+    sinkT = 0;
+    Body.setVelocity(ball, { x: 0, y: 0 });
+    Body.setStatic(ball, true);
+    scores[holeIndex] = strokes;
+    updateHud();
+  }
+
+  function scoreName(s, par) {
+    if (s === 1) return 'Hole in one!';
+    const d = s - par;
+    return { '-3': 'Albatross!', '-2': 'Eagle!', '-1': 'Birdie!', 0: 'Par', 1: 'Bogey', 2: 'Double bogey' }[d] || `+${d}`;
+  }
+
+  function showHoleCard() {
+    const last = holeIndex === HOLES.length - 1;
+    card.innerHTML = `<h2>${scoreName(strokes, hole.par)}</h2>
+      <p>Hole ${holeIndex + 1}, ${hole.name}: ${strokes} stroke${strokes === 1 ? '' : 's'} (par ${hole.par})</p>
+      <button id="next">${last ? 'See scorecard' : 'Next hole'}</button>`;
+    overlay.classList.add('show');
+    document.getElementById('next').onclick = () => last ? showScorecard() : loadHole(holeIndex + 1);
+  }
+
+  function showScorecard() {
+    state = 'done';
+    const total = scores.reduce((a, b) => a + b, 0), par = HOLES.reduce((a, h) => a + h.par, 0);
+    const diff = total - par;
+    const rows = HOLES.map((h, i) => `<tr><td>${i + 1}. ${h.name}</td><td>${h.par}</td><td>${scores[i]}</td></tr>`).join('');
+    card.innerHTML = `<h2>Round complete</h2>
+      <p>${total} strokes, ${diff === 0 ? 'level par' : diff < 0 ? `${-diff} under par` : `${diff} over par`}</p>
+      <table><tr><th>Hole</th><th>Par</th><th>You</th></tr>${rows}
+      <tr><th>Total</th><th>${par}</th><th>${total}</th></tr></table>
+      <button id="again">Play again</button>`;
+    overlay.classList.add('show');
+    document.getElementById('again').onclick = () => { scores = []; loadHole(0); };
+  }
+
+  function updateHud() {
+    const total = scores.slice(0, holeIndex).reduce((a, b) => a + b, 0) + strokes;
+    hudEl.innerHTML = `<span>Hole <b>${holeIndex + 1}</b>/${HOLES.length}</span><span>${hole.name}</span>
+      <span>Par <b>${hole.par}</b></span><span>Strokes <b>${strokes}</b></span><span>Round <b>${total}</b></span>`;
+  }
+
+  function flash(text) {
+    msgEl.textContent = text;
+    msgEl.classList.add('show');
+    clearTimeout(msgTimer);
+    msgTimer = setTimeout(() => msgEl.classList.remove('show'), 1600);
+  }
+
+  // ---------- Input ----------
+  function toWorld(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+  }
+  function shotVector() {
+    let dx = aimStart.x - aimNow.x, dy = aimStart.y - aimNow.y;
+    const len = Math.hypot(dx, dy), power = Math.min(len, MAX_PULL) / MAX_PULL;
+    if (len < 4) return null;
+    return { x: dx / len, y: dy / len, power };
+  }
+  canvas.addEventListener('pointerdown', e => {
+    if (state !== 'aim') return;
+    canvas.setPointerCapture(e.pointerId);
+    aimStart = aimNow = toWorld(e);
+  });
+  canvas.addEventListener('pointermove', e => { if (aimStart) aimNow = toWorld(e); });
+  const release = e => {
+    if (!aimStart) return;
+    aimNow = toWorld(e);
+    const s = shotVector();
+    aimStart = aimNow = null;
+    if (!s || state !== 'aim' || s.power < 0.03) return;
+    lastRest = { x: ball.position.x, y: ball.position.y };
+    strokes++;
+    Body.setVelocity(ball, { x: s.x * s.power * MAX_SPEED, y: s.y * s.power * MAX_SPEED });
+    state = 'rolling';
+    updateHud();
+  };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', () => { aimStart = aimNow = null; });
+  document.getElementById('restart').onclick = () => { if (state !== 'done') loadHole(holeIndex); };
+
+  // ---------- Drawing ----------
+  function path(body) {
+    const v = body.vertices;
+    ctx.beginPath(); ctx.moveTo(v[0].x, v[0].y);
+    for (let i = 1; i < v.length; i++) ctx.lineTo(v[i].x, v[i].y);
+    ctx.closePath();
+  }
+  function rect([x, y, w, h]) { ctx.beginPath(); ctx.rect(x - w / 2, y - h / 2, w, h); }
+
+  function draw() {
+    // Fairway
+    ctx.fillStyle = '#2f7d32'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.035)';
+    for (let x = 0; x < W; x += 80) ctx.fillRect(x, 0, 40, H);
+
+    // Toner spills
+    (hole.toner || []).forEach(z => {
+      rect(z); ctx.fillStyle = '#2a2f33'; ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      const [x, y, w, h] = z;
+      for (let i = 0; i < w * h / 180; i++) {
+        const px = x - w / 2 + ((i * 97) % w), py = y - h / 2 + ((i * 53) % h);
+        ctx.fillRect(px, py, 1.5, 1.5);
+      }
+    });
+    // Coffee
+    (hole.coffee || []).forEach(z => {
+      rect(z); ctx.fillStyle = '#5b3a24'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,230,200,0.18)'; ctx.lineWidth = 2;
+      const [x, y, w, h] = z;
+      for (let k = 0; k < 3; k++) { ctx.beginPath(); ctx.ellipse(x, y, w * (0.15 + k * 0.12), h * (0.1 + k * 0.1), 0, 0, Math.PI * 2); ctx.stroke(); }
+    });
+
+    // Cup + flag
+    const [cx, cy] = hole.cup;
+    ctx.beginPath(); ctx.arc(cx, cy, CUP_R + 3, 0, Math.PI * 2); ctx.fillStyle = '#e7efe9'; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, CUP_R, 0, Math.PI * 2); ctx.fillStyle = '#0d1410'; ctx.fill();
+    ctx.strokeStyle = '#d9d9d9'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy - 46); ctx.stroke();
+    ctx.fillStyle = '#6cc04a';
+    ctx.beginPath(); ctx.moveTo(cx, cy - 46); ctx.lineTo(cx + 26, cy - 39); ctx.lineTo(cx, cy - 32); ctx.fill();
+
+    // Tee
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(hole.tee[0], hole.tee[1], 15, 0, Math.PI * 2); ctx.fill();
+
+    // Static bodies
+    for (const b of Composite.allBodies(engine.world)) {
+      if (b === ball) continue;
+      if (b.label === 'bumper') {
+        ctx.beginPath(); ctx.arc(b.position.x, b.position.y, b.circleRadius, 0, Math.PI * 2);
+        ctx.fillStyle = '#f2a33a'; ctx.fill();
+        ctx.beginPath(); ctx.arc(b.position.x, b.position.y, b.circleRadius * 0.55, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffd38a'; ctx.fill();
+      } else if (b.label === 'spinner') {
+        path(b); ctx.fillStyle = '#b8c2c8'; ctx.fill();
+        ctx.strokeStyle = '#6d7a82'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(b.position.x, b.position.y, 7, 0, Math.PI * 2); ctx.fillStyle = '#39444b'; ctx.fill();
+      } else if (b.label === 'mover') {
+        path(b); ctx.fillStyle = '#e9edef'; ctx.fill();
+        ctx.strokeStyle = '#8a959b'; ctx.lineWidth = 2; ctx.stroke();
+        const { x, y } = b.position;
+        ctx.fillStyle = '#39444b'; ctx.fillRect(x - 22, y - 6, 44, 6);
+        ctx.fillStyle = '#6cc04a'; ctx.fillRect(x + 20, y + 14, 6, 6);
+      } else {
+        // Walls: stacks of paper
+        path(b); ctx.fillStyle = '#f4f1e8'; ctx.fill();
+        ctx.strokeStyle = '#c9c3b2'; ctx.lineWidth = 2; ctx.stroke();
+      }
+    }
+
+    // Ball (crumpled paper)
+    let r = BALL_R;
+    if (state === 'sunk') {
+      sinkT++;
+      r = BALL_R * Math.max(0, 1 - sinkT / 22);
+      Body.setPosition(ball, { x: ball.position.x + (cx - ball.position.x) * 0.25, y: ball.position.y + (cy - ball.position.y) * 0.25 });
+      if (sinkT === 30) showHoleCard();
+    }
+    if (r > 0) {
+      const { x, y } = ball.position, a = ball.angle;
+      ctx.beginPath(); ctx.arc(x + 2, y + 3, r, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = '#ffffff'; ctx.fill();
+      ctx.strokeStyle = '#b9bec2'; ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let k = 0; k < 3; k++) {
+        const t0 = a + k * 2.1;
+        ctx.moveTo(x + Math.cos(t0) * r * 0.8, y + Math.sin(t0) * r * 0.8);
+        ctx.lineTo(x + Math.cos(t0 + 2.4) * r * 0.3, y + Math.sin(t0 + 2.4) * r * 0.3);
+      }
+      ctx.stroke();
+    }
+
+    // Aim line + power meter
+    if (state === 'aim' && aimStart) {
+      const s = shotVector();
+      if (s) {
+        const { x, y } = ball.position, len = 30 + s.power * 140;
+        ctx.setLineDash([6, 6]); ctx.lineWidth = 3;
+        ctx.strokeStyle = `hsl(${120 - s.power * 120}, 85%, 60%)`;
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + s.x * len, y + s.y * len); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(W - 150, H - 30, 130, 14);
+        ctx.fillStyle = `hsl(${120 - s.power * 120}, 85%, 55%)`; ctx.fillRect(W - 150, H - 30, 130 * s.power, 14);
+        ctx.fillStyle = '#fff'; ctx.font = '11px system-ui'; ctx.fillText('POWER', W - 196, H - 19);
+      }
+    } else if (state === 'aim') {
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(ball.position.x, ball.position.y, BALL_R + 6 + Math.sin(tick / 10) * 2, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  // Fixed 60 Hz physics step, decoupled from the display refresh rate.
+  let acc = 0, last = performance.now();
+  function frame(now) {
+    acc += Math.min(now - last, 100); last = now;
+    while (acc >= 1000 / 60) { stepWorld(); acc -= 1000 / 60; }
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener('resize', resize);
+  loadHole(0);
+  resize();
+  requestAnimationFrame(frame);
+  window.__game = { get ball() { return ball; }, get state() { return state; }, get hole() { return holeIndex; }, loadHole };
+})();
+</script>
+</body>
+</html>
